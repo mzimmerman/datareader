@@ -415,11 +415,6 @@ func rle_decompress(result_length int, inbuff []byte) ([]byte, error) {
 			return nil, fmt.Errorf("unknown control byte: %v", control_byte)
 		}
 	}
-
-	if len(result) != result_length {
-		os.Stderr.WriteString(fmt.Sprintf("RLE: %v != %v\n", len(result), result_length))
-	}
-
 	return result, nil
 }
 
