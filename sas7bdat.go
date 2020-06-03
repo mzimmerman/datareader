@@ -26,8 +26,6 @@ import (
 
 // SAS7BDAT represents a SAS data file in SAS7BDAT format.
 type SAS7BDAT struct {
-	// Data types of the columns
-	column_types []int
 
 	// Formats for the columns
 	ColumnFormats []string
@@ -40,14 +38,23 @@ type SAS7BDAT struct {
 	// not work for all SAS date formats)
 	ConvertDates bool
 
+	// If true, strings are represented as uint64 values.  Call
+	// the StringFactorMap method to obtain the mapping from these
+	// coded values to the actual strings that they represent.
+	FactorizeStrings bool
+
+	// If true, turns off alignment correction when reading mix-type pages.
+	// In general this should be set to false.  However some files
+	// are read incorrectly and need this flag set to true.  At present,
+	// we do not know how to automatically detect the correct setting, so
+	// we leave this as a configurable option.
+	NoAlignCorrection bool
+
 	// The creation date of the file
 	DateCreated time.Time
 
 	// The modification date of the file
 	DateModified time.Time
-
-	// The number of rows in the file
-	row_count int
 
 	// The name of the data set
 	Name string
@@ -85,54 +92,63 @@ type SAS7BDAT struct {
 	// A decoder for decoding text to unicode
 	TextDecoder *xencoding.Decoder
 
-	encoding                             string
-	column_names                         []string
-	path                                 string
-	buf                                  []byte
-	align_correction                     int
-	file                                 io.ReadSeeker
-	cached_page                          []byte
-	current_page_type                    int
-	current_page_block_count             int
-	current_page_subheaders_count        int
-	current_row_in_file_index            int
-	current_row_on_page_index            int
-	current_page_data_subheader_pointers []*subheaderPointer
-	stringchunk                          [][]string
-	bytechunk                            [][]byte
-	current_row_in_chunk_index           int
-	column_names_strings                 []string
-	column_data_offsets                  []int
-	column_data_lengths                  []int
-	columns                              []*Column
-	properties                           *sasProperties
+	// The number of rows in the file
+	rowCount int
+
+	// Data types of the columns
+	columnTypes []ColumnTypeT
+
+	// Labels for the columns
+	columnLabels []string
+
+	// Names of the columns
+	columnNames []string
+
+	buf                              []byte
+	file                             io.ReadSeeker
+	cachedPage                       []byte
+	currentPageType                  int
+	currentPageBlockCount            int
+	currentPageSubheadersCount       int
+	currentRowInFileIndex            int
+	currentRowOnPageIndex            int
+	currentPageDataSubheaderPointers []*subheaderPointer
+	stringchunk                      [][]uint64
+	bytechunk                        [][]byte
+	currentRowInChunkIndex           int
+	columnNamesStrings               []string
+	columnDataOffsets                []int
+	columnDataLengths                []int
+	columns                          []*column
+	properties                       *sasProperties
+	stringPool                       map[uint64]string
+	stringPoolR                      map[string]uint64
 }
 
 // These values don't change after the header is read.
 type sasProperties struct {
-	int_length               int
-	page_bit_offset          int
-	subheader_pointer_length int
-	header_length            int
-	page_length              int
-	page_count               int
-	row_length               int
-	col_count_p1             int
-	col_count_p2             int
-	mix_page_row_count       int
-	lcs                      int
-	lcp                      int
-	creator                  string
-	creator_proc             string
-	column_count             int
+	intLength              int
+	pageBitOffset          int
+	subheaderPointerLength int
+	headerLength           int
+	pageLength             int
+	pageCount              int
+	rowLength              int
+	colCountP1             int
+	colCountP2             int
+	mixPageRowCount        int
+	lcs                    int
+	lcp                    int
+	creatorProc            string
+	columnCount            int
 }
 
-type Column struct {
-	col_id int
+type column struct {
+	colId  int
 	name   string
 	label  string
 	format string
-	ctype  int
+	ctype  ColumnTypeT
 	length int
 }
 
@@ -144,20 +160,23 @@ type subheaderPointer struct {
 }
 
 const (
-	rowSizeIndex          = iota
-	columnSizeIndex       = iota
-	subheaderCountsIndex  = iota
-	columnTextIndex       = iota
-	columnNameIndex       = iota
-	columnAttributesIndex = iota
-	formatAndLabelIndex   = iota
-	columnListIndex       = iota
-	dataSubheaderIndex    = iota
+	rowSizeIndex = iota
+	columnSizeIndex
+	subheaderCountsIndex
+	columnTextIndex
+	columnNameIndex
+	columnAttributesIndex
+	formatAndLabelIndex
+	columnListIndex
+	dataSubheaderIndex
 )
 
+// ColumnTypeT is the type of a data column in a SAS or Stata file.
+type ColumnTypeT uint16
+
 const (
-	number_column_type = iota
-	string_column_type = iota
+	SASNumericType ColumnTypeT = iota
+	SASStringType
 )
 
 // Subheader signatures, 32 and 64 bit, little and big endian
@@ -200,7 +219,6 @@ const (
 	align_1_checker_value                     = '3'
 	align_1_offset                            = 32
 	align_1_length                            = 1
-	align_1_value                             = 4
 	u64_byte_checker_value                    = '3'
 	align_2_offset                            = 35
 	align_2_length                            = 1
@@ -248,8 +266,6 @@ const (
 	page_meta_type                            = 0
 	page_data_type                            = 256
 	page_amd_type                             = 1024
-	page_metc_type                            = 16384
-	page_comp_type                            = -28672
 	subheader_pointers_offset                 = 8
 	truncated_subheader_id                    = 1
 	compressed_subheader_id                   = 4
@@ -288,15 +304,22 @@ const (
 	rdc_compression                           = "SASYZCR2"
 )
 
+// StringFactorMap returns a map that associates integer codes
+// with the string value that each code represents.  This is only
+// relevant if FactorizeStrings is set to True.
+func (sas *SAS7BDAT) StringFactorMap() map[uint64]string {
+	return sas.stringPool
+}
+
 // Incomplete list of encodings
 var encoding_names = map[int]string{29: "latin1", 20: "utf-8", 33: "cyrillic", 60: "wlatin2",
 	61: "wcyrillic", 62: "wlatin1", 90: "ebcdic870"}
 
 var compression_literals = []string{rle_compression, rdc_compression}
 
-// ensure_buf_size enlarges the data buffer if needed to accommodate
+// ensureBufSize enlarges the data buffer if needed to accommodate
 // at least m bytes of data.
-func (sas *SAS7BDAT) ensure_buf_size(m int) {
+func (sas *SAS7BDAT) ensureBufSize(m int) {
 	if cap(sas.buf) < m {
 		sas.buf = make([]byte, 2*m)
 	}
@@ -468,7 +491,7 @@ func rdc_decompress(result_length int, inbuff []byte) ([]byte, error) {
 	return outbuff, nil
 }
 
-func (sas *SAS7BDAT) get_decompressor() func(int, []byte) ([]byte, error) {
+func (sas *SAS7BDAT) getDecompressor() func(int, []byte) ([]byte, error) {
 	switch sas.Compression {
 	default:
 		return nil
@@ -489,7 +512,8 @@ func NewSAS7BDATReader(r io.ReadSeeker) (*SAS7BDAT, error) {
 	if err != nil {
 		return nil, err
 	}
-	sas.cached_page = make([]byte, sas.properties.page_length)
+
+	sas.cachedPage = make([]byte, sas.properties.pageLength)
 	err = sas.parseMetadata()
 	if err != nil {
 		return nil, err
@@ -502,14 +526,17 @@ func NewSAS7BDATReader(r io.ReadSeeker) (*SAS7BDAT, error) {
 	return sas, nil
 }
 
-// read_bytes read length bytes from the given offset in the current
+// readBytes read length bytes from the given offset in the current
 // page (or from the beginning of the file if no page has yet been
 // read).
-func (sas *SAS7BDAT) read_bytes(offset, length int) error {
-	sas.ensure_buf_size(length)
+func (sas *SAS7BDAT) readBytes(offset, length int) error {
 
-	if sas.cached_page == nil {
-		sas.file.Seek(int64(offset), 0)
+	sas.ensureBufSize(length)
+
+	if sas.cachedPage == nil {
+		if _, err := sas.file.Seek(int64(offset), 0); err != nil {
+			panic(err)
+		}
 		n, err := sas.file.Read(sas.buf[0:length])
 		if err != nil {
 			return err
@@ -517,15 +544,15 @@ func (sas *SAS7BDAT) read_bytes(offset, length int) error {
 			return fmt.Errorf("Unable to read %d bytes from file position %d.", length, offset)
 		}
 	} else {
-		if offset+length > len(sas.cached_page) {
+		if offset+length > len(sas.cachedPage) {
 			return fmt.Errorf("The cached page is too small.")
 		}
-		copy(sas.buf, sas.cached_page[offset:offset+length])
+		copy(sas.buf, sas.cachedPage[offset:offset+length])
 	}
 	return nil
 }
 
-func (sas *SAS7BDAT) read_float(offset, width int) (float64, error) {
+func (sas *SAS7BDAT) readFloat(offset, width int) (float64, error) {
 	r := bytes.NewReader(sas.buf[offset : offset+width])
 	var x float64
 	switch width {
@@ -541,7 +568,7 @@ func (sas *SAS7BDAT) read_float(offset, width int) (float64, error) {
 }
 
 // Read an integer of 1, 2, 4 or 8 byte width from the supplied bytes.
-func (sas *SAS7BDAT) read_int_from_buffer(buf []byte, width int) (int, error) {
+func (sas *SAS7BDAT) readIntFromBuffer(buf []byte, width int) (int, error) {
 
 	r := bytes.NewReader(buf[0:width])
 	switch width {
@@ -581,14 +608,14 @@ func (sas *SAS7BDAT) read_int_from_buffer(buf []byte, width int) (int, error) {
 // Read an integer of 1, 2, 4 or 8 byte width from a given offset in
 // the current page (or from the beginning of the file if no page has
 // yet been read), then return it as an int.
-func (sas *SAS7BDAT) read_int(offset, width int) (int, error) {
+func (sas *SAS7BDAT) readInt(offset, width int) (int, error) {
 
-	err := sas.read_bytes(offset, width)
+	err := sas.readBytes(offset, width)
 	if err != nil {
 		return 0, err
 	}
 
-	x, err := sas.read_int_from_buffer(sas.buf[0:width], width)
+	x, err := sas.readIntFromBuffer(sas.buf[0:width], width)
 	if err != nil {
 		return 0, err
 	}
@@ -598,39 +625,42 @@ func (sas *SAS7BDAT) read_int(offset, width int) (int, error) {
 // Read returns up to num_rows rows of data from the SAS7BDAT file, as
 // an array of Series objects.  The Series data types are either
 // float64 or string.  If num_rows is negative, the remainder of the
-// file is read.  Returns nil, nil when the no rows remain.
+// file is read.  Returns (nil, io.EOF) when no rows remain.
 //
-// SAS strings variables have a fixed width.  By default, right
-// whitespace is trimmed from each string, but this can be turned off
-// by setting the TrimRight field in the SAS7BDAT struct.
+// SAS strings variables have a fixed width and are right-padded with
+// whitespace.  The TrimRight field of the SAS7BDAT struct can be set
+// to true to automatically trim this whitespace.
 func (sas *SAS7BDAT) Read(num_rows int) ([]*Series, error) {
 
 	if num_rows < 0 {
-		num_rows = sas.row_count - sas.current_row_in_file_index
+		num_rows = sas.rowCount - sas.currentRowInFileIndex
 	}
 
-	if sas.current_row_in_file_index >= sas.row_count {
-		return nil, nil
+	if sas.currentRowInFileIndex >= sas.rowCount {
+		return nil, io.EOF
 	}
 
-	// Reallocate each time so the results are backed by
+	sas.stringPool = make(map[uint64]string)
+	sas.stringPoolR = make(map[string]uint64)
+
+	// Reallocate each call so the results are backed by
 	// completely independent memory with each call to read (to
 	// support concurrent processing of results while continuing
 	// reading).
-	sas.bytechunk = make([][]byte, sas.properties.column_count)
-	sas.stringchunk = make([][]string, sas.properties.column_count)
-	for j := 0; j < sas.properties.column_count; j++ {
-		switch sas.column_types[j] {
+	sas.bytechunk = make([][]byte, sas.properties.columnCount)
+	sas.stringchunk = make([][]uint64, sas.properties.columnCount)
+	for j := 0; j < sas.properties.columnCount; j++ {
+		switch sas.columnTypes[j] {
+		case SASNumericType:
+			sas.bytechunk[j] = make([]byte, 8*num_rows)
+		case SASStringType:
+			sas.stringchunk[j] = make([]uint64, num_rows)
 		default:
 			return nil, fmt.Errorf("unknown column type")
-		case number_column_type:
-			sas.bytechunk[j] = make([]byte, 8*num_rows)
-		case string_column_type:
-			sas.stringchunk[j] = make([]string, num_rows)
 		}
 	}
 
-	sas.current_row_in_chunk_index = 0
+	sas.currentRowInChunkIndex = 0
 	for i := 0; i < num_rows; i++ {
 		err, done := sas.readline()
 		if err != nil {
@@ -640,54 +670,61 @@ func (sas *SAS7BDAT) Read(num_rows int) ([]*Series, error) {
 		}
 	}
 
-	rslt := sas.chunk_to_series()
+	rslt := sas.chunkToSeries()
 
 	return rslt, nil
 }
 
-func (sas *SAS7BDAT) chunk_to_series() []*Series {
+func (sas *SAS7BDAT) chunkToSeries() []*Series {
 
-	rslt := make([]*Series, sas.properties.column_count)
-	n := sas.current_row_in_chunk_index
+	rslt := make([]*Series, sas.properties.columnCount)
+	n := sas.currentRowInChunkIndex
 
-	for j := 0; j < sas.properties.column_count; j++ {
+	for j := 0; j < sas.properties.columnCount; j++ {
 
-		name := sas.column_names[j]
+		name := sas.columnNames[j]
 		miss := make([]bool, n)
 
-		switch sas.column_types[j] {
-		default:
-			panic("Unknown column type")
-		case number_column_type:
+		switch sas.columnTypes[j] {
+		case SASNumericType:
 			vec := make([]float64, n)
 			buf := bytes.NewReader(sas.bytechunk[j][0 : 8*n])
-			binary.Read(buf, sas.ByteOrder, &vec)
+			if err := binary.Read(buf, sas.ByteOrder, &vec); err != nil {
+				panic(err)
+			}
 			for i := 0; i < n; i++ {
 				if math.IsNaN(vec[i]) {
 					miss[i] = true
 				}
 			}
-			if sas.ConvertDates && (sas.ColumnFormats[j] == "MMDDYY") {
-				tvec := to_date(vec)
+			if sas.ConvertDates && sas.ColumnFormats[j] == "MMDDYY" || sas.ColumnFormats[j] == "DATE" {
+				tvec := toDate(vec)
+				rslt[j], _ = NewSeries(name, tvec, miss)
+			} else if sas.ConvertDates && sas.ColumnFormats[j] == "DATETIME" {
+				tvec := toDateTime(vec)
 				rslt[j], _ = NewSeries(name, tvec, miss)
 			} else {
 				rslt[j], _ = NewSeries(name, vec, miss)
 			}
-		case string_column_type:
-			if sas.TextDecoder != nil {
-				sas.decodeStrings(n, j)
+		case SASStringType:
+			if sas.FactorizeStrings {
+				rslt[j], _ = NewSeries(name, sas.stringchunk[j], miss)
+			} else {
+				s := make([]string, n)
+				for i := 0; i < n; i++ {
+					s[i] = sas.stringPool[sas.stringchunk[j][i]]
+				}
+				rslt[j], _ = NewSeries(name, s, miss)
 			}
-			if sas.TrimStrings {
-				sas.trimStrings(n, j)
-			}
-			rslt[j], _ = NewSeries(name, sas.stringchunk[j][0:n], miss)
+		default:
+			panic("Unknown column type")
 		}
 	}
 
 	return rslt
 }
 
-func to_date(x []float64) []time.Time {
+func toDate(x []float64) []time.Time {
 
 	rslt := make([]time.Time, len(x))
 
@@ -700,32 +737,33 @@ func to_date(x []float64) []time.Time {
 	return rslt
 }
 
-func (sas *SAS7BDAT) trimStrings(n, j int) {
-	for i := 0; i < n; i++ {
-		s := sas.stringchunk[j][i]
-		sas.stringchunk[j][i] = strings.TrimRight(s, "\u0000\u0020")
-	}
+func date_time(x float64) time.Time {
+	// Timestamp is epoch 01/01/1960
+	base := time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC)
+	return base.Add(time.Duration(x) * time.Second)
 }
 
-func (sas *SAS7BDAT) decodeStrings(n, j int) {
-	for i := 0; i < n; i++ {
-		s, err := sas.TextDecoder.String(sas.stringchunk[j][i])
-		if err != nil {
-			panic(err)
-		}
-		sas.stringchunk[j][i] = s
+func toDateTime(x []float64) []time.Time {
+	rslt := make([]time.Time, len(x))
+
+	for j, v := range x {
+		rslt[j] = date_time(v)
 	}
+
+	return rslt
 }
 
 func (sas *SAS7BDAT) readline() (error, bool) {
 
-	bit_offset := sas.properties.page_bit_offset
-	subheader_pointer_length := sas.properties.subheader_pointer_length
+	bit_offset := sas.properties.pageBitOffset
+	subheaderPointerLength := sas.properties.subheaderPointerLength
 
 	// If there is no page, go to the end of the header and read a page.
-	if sas.cached_page == nil {
-		sas.file.Seek(int64(sas.properties.header_length), 0)
-		err, done := sas.read_next_page()
+	if sas.cachedPage == nil {
+		if _, err := sas.file.Seek(int64(sas.properties.headerLength), 0); err != nil {
+			return err, false
+		}
+		err, done := sas.readNextPage()
 		if err != nil {
 			return err, false
 		} else if done {
@@ -735,148 +773,154 @@ func (sas *SAS7BDAT) readline() (error, bool) {
 
 	// Loop until a data row is read
 	for {
-		if sas.current_page_type == page_meta_type {
-			if sas.current_row_on_page_index >= len(sas.current_page_data_subheader_pointers) {
-				err, done := sas.read_next_page()
+		if sas.currentPageType == page_meta_type {
+			if sas.currentRowOnPageIndex >= len(sas.currentPageDataSubheaderPointers) {
+				err, done := sas.readNextPage()
 				if err != nil {
 					return err, false
 				} else if done {
 					return nil, true
 				}
-				sas.current_row_on_page_index = 0
+				sas.currentRowOnPageIndex = 0
 				continue
 			}
-			current_subheader_pointer :=
-				sas.current_page_data_subheader_pointers[sas.current_row_on_page_index]
-			err := sas.process_byte_array_with_data(current_subheader_pointer.offset, current_subheader_pointer.length)
+			current_subheader_pointer := sas.currentPageDataSubheaderPointers[sas.currentRowOnPageIndex]
+			err := sas.processByteArrayWithData(current_subheader_pointer.offset, current_subheader_pointer.length)
 			if err != nil {
 				return err, false
 			}
 			return nil, false
-		} else if sas.is_page_mix_type(sas.current_page_type) {
-			align_correction := bit_offset + subheader_pointers_offset +
-				sas.current_page_subheaders_count*subheader_pointer_length
-			align_correction = align_correction % 8
-			offset := bit_offset + align_correction
-			offset += subheader_pointers_offset
-			offset += sas.current_page_subheaders_count * subheader_pointer_length
-			offset += sas.current_row_on_page_index * sas.properties.row_length
-			err := sas.process_byte_array_with_data(offset, sas.properties.row_length)
+		} else if sas.isPageMixType(sas.currentPageType) {
+			alignCorrection := (bit_offset + subheader_pointers_offset +
+				sas.currentPageSubheadersCount*subheaderPointerLength) % 8
+			if sas.NoAlignCorrection {
+				alignCorrection = 0
+			}
+			offset := bit_offset + subheader_pointers_offset +
+				sas.currentPageSubheadersCount*subheaderPointerLength +
+				sas.currentRowOnPageIndex*sas.properties.rowLength +
+				alignCorrection
+			err := sas.processByteArrayWithData(offset, sas.properties.rowLength)
 			if err != nil {
 				return err, false
 			}
-			if sas.current_row_on_page_index == min(
-				sas.row_count,
-				sas.properties.mix_page_row_count) {
-				err, done := sas.read_next_page()
+			if sas.currentRowOnPageIndex == min(sas.rowCount, sas.properties.mixPageRowCount) {
+				err, done := sas.readNextPage()
 				if err != nil {
 					return err, false
 				} else if done {
 					return nil, true
 				}
-				sas.current_row_on_page_index = 0
+				sas.currentRowOnPageIndex = 0
 			}
 			return nil, false
-		} else if sas.current_page_type == page_data_type {
-			err := sas.process_byte_array_with_data(
-				bit_offset+subheader_pointers_offset+
-					sas.current_row_on_page_index*
-						sas.properties.row_length,
-				sas.properties.row_length)
+		} else if sas.currentPageType == page_data_type {
+			err := sas.processByteArrayWithData(
+				bit_offset+subheader_pointers_offset+sas.currentRowOnPageIndex*sas.properties.rowLength,
+				sas.properties.rowLength)
 			if err != nil {
 				return err, false
 			}
-			if sas.current_row_on_page_index == sas.current_page_block_count {
-				err, done := sas.read_next_page()
+			if sas.currentRowOnPageIndex == sas.currentPageBlockCount {
+				err, done := sas.readNextPage()
 				if err != nil {
 					return err, false
 				} else if done {
 					return nil, true
 				}
-				sas.current_row_on_page_index = 0
+				sas.currentRowOnPageIndex = 0
 			}
 			return nil, false
 		} else {
-			return fmt.Errorf("unknown page type: %d", sas.current_page_type), false
+			return fmt.Errorf("unknown page type: %d", sas.currentPageType), false
 		}
 	}
-	return nil, false
 }
 
-func (sas *SAS7BDAT) read_next_page() (error, bool) {
-	sas.current_page_data_subheader_pointers = make([]*subheaderPointer, 0, 10)
-	sas.cached_page = make([]byte, sas.properties.page_length)
-	n, err := sas.file.Read(sas.cached_page)
+func (sas *SAS7BDAT) readNextPage() (error, bool) {
+
+	sas.currentPageDataSubheaderPointers = make([]*subheaderPointer, 0, 10)
+	sas.cachedPage = make([]byte, sas.properties.pageLength)
+	n, err := sas.file.Read(sas.cachedPage)
 	if n <= 0 {
 		return nil, true
 	}
-	if err != nil {
+
+	if err != nil && err != io.EOF {
 		return err, false
 	}
 
-	if len(sas.cached_page) != sas.properties.page_length {
+	if len(sas.cachedPage) != sas.properties.pageLength {
 		return fmt.Errorf("failed to read complete page from file (read %d of %d bytes)",
-			len(sas.cached_page), sas.properties.page_length), false
+			len(sas.cachedPage), sas.properties.pageLength), false
 	}
-	sas.read_page_header()
-	if sas.current_page_type == page_meta_type {
-		err = sas.process_page_metadata()
+
+	if err := sas.readPageHeader(); err != nil {
+		return err, false
+	}
+
+	if sas.currentPageType == page_meta_type {
+		err = sas.processPageMetadata()
 		if err != nil {
 			return err, false
 		}
 	}
-	if check_page_type(sas.current_page_type) {
-		return sas.read_next_page()
+
+	if checkPageType(sas.currentPageType) {
+		return sas.readNextPage()
 	}
+
 	return nil, false
 }
 
 func (sas *SAS7BDAT) getProperties() error {
+
 	prop := new(sasProperties)
 	sas.properties = prop
 
 	// Check magic number
-	err := sas.read_bytes(0, 288)
+	err := sas.readBytes(0, 288)
 	if err != nil {
 		return err
 	}
-	sas.cached_page = make([]byte, 288)
-	copy(sas.cached_page, sas.buf[0:288])
-	if check_magic_number(sas.cached_page) == false {
+	sas.cachedPage = make([]byte, 288)
+	copy(sas.cachedPage, sas.buf[0:288])
+	if !bytes.Equal(sas.cachedPage[0:len(magic)], []byte(magic)) {
 		return fmt.Errorf("magic number mismatch (not a SAS file?)")
 	}
 
 	// Get alignment information
-	align1 := 0
-	align2 := 0
-	err = sas.read_bytes(align_1_offset, align_1_length)
+	var align1, align2 int
+	err = sas.readBytes(align_1_offset, align_1_length)
 	if err != nil {
 		return err
 	}
-	prop.page_bit_offset = page_bit_offset_x86
-	prop.subheader_pointer_length = subheader_pointer_length_x86
-	prop.int_length = 4
-	if string(sas.buf[0:align_1_length]) == string(u64_byte_checker_value) {
+	prop.pageBitOffset = page_bit_offset_x86
+	prop.subheaderPointerLength = subheader_pointer_length_x86
+	prop.intLength = 4
+	if sas.buf[0] == u64_byte_checker_value {
 		align2 = align_2_value
 		sas.U64 = true
-		prop.int_length = 8
-		prop.page_bit_offset = page_bit_offset_x64
-		prop.subheader_pointer_length = subheader_pointer_length_x64
+		prop.intLength = 8
+		prop.pageBitOffset = page_bit_offset_x64
+		prop.subheaderPointerLength = subheader_pointer_length_x64
 	}
-	err = sas.read_bytes(align_2_offset, align_2_length)
+	err = sas.readBytes(align_2_offset, align_2_length)
 	if err != nil {
 		return err
 	}
+
 	if string(sas.buf[0:align_2_length]) == string(align_1_checker_value) {
 		align1 = align_2_value
 	}
 	total_align := align1 + align2
 
 	// Get endianness information
-	err = sas.read_bytes(endianness_offset, endianness_length)
+	err = sas.readBytes(endianness_offset, endianness_length)
 	if err != nil {
 		return err
 	}
+
 	if sas.buf[0] == '\x01' {
 		sas.ByteOrder = binary.LittleEndian
 	} else {
@@ -884,7 +928,7 @@ func (sas *SAS7BDAT) getProperties() error {
 	}
 
 	// Get platform information
-	err = sas.read_bytes(platform_offset, platform_length)
+	err = sas.readBytes(platform_offset, platform_length)
 	if err != nil {
 		return err
 	}
@@ -897,7 +941,7 @@ func (sas *SAS7BDAT) getProperties() error {
 	}
 
 	// Try to get encoding information.
-	err = sas.read_bytes(encoding_offset, encoding_length)
+	err = sas.readBytes(encoding_offset, encoding_length)
 	if err != nil {
 		return err
 	}
@@ -909,83 +953,83 @@ func (sas *SAS7BDAT) getProperties() error {
 		sas.FileEncoding = fmt.Sprintf("encoding code=%d", xb)
 	}
 
-	err = sas.read_bytes(dataset_offset, dataset_length)
+	err = sas.readBytes(dataset_offset, dataset_length)
 	if err != nil {
 		return err
 	}
 	sas.Name = string(sas.buf[0:dataset_length])
 
-	err = sas.read_bytes(file_type_offset, file_type_length)
+	err = sas.readBytes(file_type_offset, file_type_length)
 	if err != nil {
 		return err
 	}
 	sas.FileType = string(sas.buf[0:file_type_length])
 
-	// Timestamp is epoch 01/01/1960
-	epoch := time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC)
-	x, err := sas.read_float(date_created_offset+align1, date_created_length)
+	x, err := sas.readFloat(date_created_offset+align1, date_created_length)
 	if err != nil {
 		return err
 	}
-	sas.DateCreated = epoch.Add(time.Duration(x) * time.Second)
+	sas.DateCreated = date_time(x)
 
-	x, err = sas.read_float(date_modified_offset+align1, date_modified_length)
+	x, err = sas.readFloat(date_modified_offset+align1, date_modified_length)
 	if err != nil {
 		return err
 	}
-	sas.DateModified = epoch.Add(time.Duration(x) * time.Second)
+	sas.DateModified = date_time(x)
 
-	prop.header_length, err = sas.read_int(header_size_offset+align1, header_size_length)
+	prop.headerLength, err = sas.readInt(header_size_offset+align1, header_size_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read header size\n")
 	}
-	if sas.U64 && prop.header_length != 8192 {
-		os.Stderr.WriteString(fmt.Sprintf("header length %d != 8192\n", prop.header_length))
+	if sas.U64 && prop.headerLength != 8192 {
+		os.Stderr.WriteString(fmt.Sprintf("header length %d != 8192\n", prop.headerLength))
 	}
 
-	// Read the rest of the header into cached_page.
-	v := make([]byte, prop.header_length-288)
-	sas.file.Read(v)
-	sas.cached_page = append(sas.cached_page, v...)
-	if len(sas.cached_page) != prop.header_length {
+	// Read the rest of the header into cachedPage.
+	v := make([]byte, prop.headerLength-288)
+	if _, err := sas.file.Read(v); err != nil {
+		return err
+	}
+	sas.cachedPage = append(sas.cachedPage, v...)
+	if len(sas.cachedPage) != prop.headerLength {
 		return fmt.Errorf("The SAS7BDAT file appears to be truncated.")
 	}
 
-	prop.page_length, err = sas.read_int(page_size_offset+align1, page_size_length)
+	prop.pageLength, err = sas.readInt(page_size_offset+align1, page_size_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read the page size value.")
 	}
-	prop.page_count, err = sas.read_int(page_count_offset+align1, page_count_length)
+	prop.pageCount, err = sas.readInt(page_count_offset+align1, page_count_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read the page count value.")
 	}
 
-	err = sas.read_bytes(sas_release_offset+total_align, sas_release_length)
+	err = sas.readBytes(sas_release_offset+total_align, sas_release_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read SAS relase value.")
 	}
 	sas.SASRelease = string(sas.buf[0:sas_release_length])
 
-	err = sas.read_bytes(sas_server_type_offset+total_align, sas_server_type_length)
+	err = sas.readBytes(sas_server_type_offset+total_align, sas_server_type_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read SAS server type value.")
 	}
 	sas.ServerType = string(bytes.TrimRight(sas.buf[0:sas_server_type_length], " \000"))
 
-	err = sas.read_bytes(os_version_number_offset+total_align, os_version_number_length)
+	err = sas.readBytes(os_version_number_offset+total_align, os_version_number_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read version number.")
 	}
 	sas.OSType = string(bytes.TrimRight(sas.buf[0:os_version_number_length], "\000"))
 
-	err = sas.read_bytes(os_name_offset+total_align, os_name_length)
+	err = sas.readBytes(os_name_offset+total_align, os_name_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read OS name.")
 	}
 	if sas.buf[0] != 0 {
 		sas.OSName = string(bytes.TrimRight(sas.buf[0:os_name_length], " \000"))
 	} else {
-		err = sas.read_bytes(os_maker_offset+total_align, os_maker_length)
+		err = sas.readBytes(os_maker_offset+total_align, os_maker_length)
 		if err != nil {
 			return fmt.Errorf("Unable to read OS maker value.")
 		}
@@ -995,18 +1039,19 @@ func (sas *SAS7BDAT) getProperties() error {
 	return nil
 }
 
-func (sas *SAS7BDAT) read_page_header() error {
-	bit_offset := sas.properties.page_bit_offset
+func (sas *SAS7BDAT) readPageHeader() error {
+
+	bitOffset := sas.properties.pageBitOffset
 	var err error
-	sas.current_page_type, err = sas.read_int(page_type_offset+bit_offset, page_type_length)
+	sas.currentPageType, err = sas.readInt(page_type_offset+bitOffset, page_type_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read page type value.")
 	}
-	sas.current_page_block_count, err = sas.read_int(block_count_offset+bit_offset, block_count_length)
+	sas.currentPageBlockCount, err = sas.readInt(block_count_offset+bitOffset, block_count_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read block count value.")
 	}
-	sas.current_page_subheaders_count, err = sas.read_int(subheader_count_offset+bit_offset, subheader_count_length)
+	sas.currentPageSubheadersCount, err = sas.readInt(subheader_count_offset+bitOffset, subheader_count_length)
 	if err != nil {
 		return fmt.Errorf("Unable to read subheader count value.")
 	}
@@ -1014,31 +1059,28 @@ func (sas *SAS7BDAT) read_page_header() error {
 	return nil
 }
 
-func (sas *SAS7BDAT) process_page_metadata() error {
-	bit_offset := sas.properties.page_bit_offset
+func (sas *SAS7BDAT) processPageMetadata() error {
 
-	for i := 0; i < sas.current_page_subheaders_count; i++ {
-		pointer, err := sas.process_subheader_pointers(
-			subheader_pointers_offset+bit_offset, i)
+	bit_offset := sas.properties.pageBitOffset
+
+	for i := 0; i < sas.currentPageSubheadersCount; i++ {
+		pointer, err := sas.processSubheaderPointers(subheader_pointers_offset+bit_offset, i)
 		if err != nil {
 			return err
 		}
-		if pointer.length == 0 {
+		if pointer.length == 0 || pointer.compression == truncated_subheader_id {
 			continue
 		}
-		if pointer.compression == truncated_subheader_id {
-			continue
-		}
-		subheader_signature, err := sas.read_subheader_signature(pointer.offset)
+		subheader_signature, err := sas.readSubheaderSignature(pointer.offset)
 		if err != nil {
 			return err
 		}
-		subheader_index, err := sas.get_subheader_index(subheader_signature,
+		subheader_index, err := sas.getSubheaderIndex(subheader_signature,
 			pointer.compression, pointer.ptype)
 		if err != nil {
 			return fmt.Errorf("unknown subheader: %v\n", subheader_signature)
 		}
-		err = sas.process_subheader(subheader_index, pointer)
+		err = sas.processSubheader(subheader_index, pointer)
 		if err != nil {
 			return err
 		}
@@ -1047,7 +1089,8 @@ func (sas *SAS7BDAT) process_page_metadata() error {
 	return nil
 }
 
-func (sas *SAS7BDAT) process_subheader(subheader_index int, pointer *subheaderPointer) error {
+func (sas *SAS7BDAT) processSubheader(subheader_index int, pointer *subheaderPointer) error {
+
 	var processor func(int, int) error
 	offset := pointer.offset
 	length := pointer.length
@@ -1056,24 +1099,23 @@ func (sas *SAS7BDAT) process_subheader(subheader_index int, pointer *subheaderPo
 	default:
 		return fmt.Errorf("unknown index type")
 	case rowSizeIndex:
-		processor = sas.process_rowsize_subheader
+		processor = sas.processRowSizeSubheader
 	case columnSizeIndex:
-		processor = sas.process_columnsize_subheader
+		processor = sas.processColumnsizeSubheader
 	case columnTextIndex:
-		processor = sas.process_columntext_subheader
+		processor = sas.processColumnTextSubheader
 	case columnNameIndex:
-		processor = sas.process_columnname_subheader
+		processor = sas.processColumnNameSubheader
 	case columnAttributesIndex:
-		processor = sas.process_columnattributes_subheader
+		processor = sas.processColumnAttributesSubheader
 	case formatAndLabelIndex:
-		processor = sas.process_format_subheader
+		processor = sas.processFormatSubheader
 	case columnListIndex:
-		processor = sas.process_columnlist_subheader
+		processor = sas.processColumnListSubheader
 	case subheaderCountsIndex:
-		processor = sas.process_subheader_counts
+		processor = sas.processSubheaderCounts
 	case dataSubheaderIndex:
-		sas.current_page_data_subheader_pointers =
-			append(sas.current_page_data_subheader_pointers, pointer)
+		sas.currentPageDataSubheaderPointers = append(sas.currentPageDataSubheaderPointers, pointer)
 		return nil
 	}
 
@@ -1085,9 +1127,10 @@ func (sas *SAS7BDAT) process_subheader(subheader_index int, pointer *subheaderPo
 	return nil
 }
 
-func (sas *SAS7BDAT) read_subheader_signature(offset int) ([]byte, error) {
-	length := sas.properties.int_length
-	err := sas.read_bytes(offset, length)
+func (sas *SAS7BDAT) readSubheaderSignature(offset int) ([]byte, error) {
+
+	length := sas.properties.intLength
+	err := sas.readBytes(offset, length)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,44 +1139,43 @@ func (sas *SAS7BDAT) read_subheader_signature(offset int) ([]byte, error) {
 	return subheader_signature, nil
 }
 
-func (sas *SAS7BDAT) process_subheader_counts(offset, length int) error {
+func (sas *SAS7BDAT) processSubheaderCounts(offset, length int) error {
 	return nil
 }
 
-func (sas *SAS7BDAT) process_subheader_pointers(offset, subheader_pointer_index int) (*subheaderPointer, error) {
+func (sas *SAS7BDAT) processSubheaderPointers(offset, subheaderPointerIndex int) (*subheaderPointer, error) {
 
-	length := sas.properties.int_length
-	subheader_pointer_length := sas.properties.subheader_pointer_length
-	total_offset := offset + subheader_pointer_length*subheader_pointer_index
+	length := sas.properties.intLength
+	subheaderPointerLength := sas.properties.subheaderPointerLength
+	totalOffset := offset + subheaderPointerLength*subheaderPointerIndex
 
-	subheader_offset, err := sas.read_int(total_offset, length)
+	subheaderOffset, err := sas.readInt(totalOffset, length)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to read subheader offset value.")
 	}
-	total_offset += length
+	totalOffset += length
 
-	subheader_length, err := sas.read_int(total_offset, length)
+	subheaderLength, err := sas.readInt(totalOffset, length)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to read subheader length value.")
 	}
-	total_offset += length
+	totalOffset += length
 
-	subheader_compression, err := sas.read_int(total_offset, 1)
+	subheaderCompression, err := sas.readInt(totalOffset, 1)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to read subheader compression value.")
 	}
-	total_offset++
+	totalOffset++
 
-	subheader_type, err := sas.read_int(total_offset, 1)
+	subheaderType, err := sas.readInt(totalOffset, 1)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to read subheader type value.")
 	}
 
-	return &subheaderPointer{subheader_offset, subheader_length,
-		subheader_compression, subheader_type}, nil
+	return &subheaderPointer{subheaderOffset, subheaderLength, subheaderCompression, subheaderType}, nil
 }
 
-func (sas *SAS7BDAT) get_subheader_index(signature []byte, compression, ptype int) (int, error) {
+func (sas *SAS7BDAT) getSubheaderIndex(signature []byte, compression, ptype int) (int, error) {
 
 	index, ok := subheader_signature_to_index[string(signature)]
 	if !ok {
@@ -1147,30 +1189,30 @@ func (sas *SAS7BDAT) get_subheader_index(signature []byte, compression, ptype in
 	return index, nil
 }
 
-func (sas *SAS7BDAT) process_byte_array_with_data(offset, length int) error {
+func (sas *SAS7BDAT) processByteArrayWithData(offset, length int) error {
 
 	var source []byte
-	if (sas.Compression != "") && (length < sas.properties.row_length) {
-		decompressor := sas.get_decompressor()
+	if sas.Compression != "" && length < sas.properties.rowLength {
+		decompressor := sas.getDecompressor()
 		var err error
-		source, err = decompressor(sas.properties.row_length, sas.cached_page[offset:offset+length])
+		source, err = decompressor(sas.properties.rowLength, sas.cachedPage[offset:offset+length])
 		if err != nil {
 			return err
 		}
 	} else {
-		source = sas.cached_page[offset : offset+length]
+		source = sas.cachedPage[offset : offset+length]
 	}
 
-	for j := 0; j < sas.properties.column_count; j++ {
-		length := sas.column_data_lengths[j]
+	for j := 0; j < sas.properties.columnCount; j++ {
+		length := sas.columnDataLengths[j]
 		if length == 0 {
 			break
 		}
-		start := sas.column_data_offsets[j]
+		start := sas.columnDataOffsets[j]
 		end := start + length
 		temp := source[start:end]
-		if sas.columns[j].ctype == number_column_type {
-			s := 8 * sas.current_row_in_chunk_index
+		if sas.columns[j].ctype == SASNumericType {
+			s := 8 * sas.currentRowInChunkIndex
 			if sas.ByteOrder == binary.LittleEndian {
 				m := 8 - length
 				copy(sas.bytechunk[j][s+m:s+8], temp)
@@ -1178,38 +1220,36 @@ func (sas *SAS7BDAT) process_byte_array_with_data(offset, length int) error {
 				copy(sas.bytechunk[j][s:s+length], temp)
 			}
 		} else {
-			sas.stringchunk[j][sas.current_row_in_chunk_index] = string(temp)
+			if sas.TrimStrings {
+				temp = bytes.TrimRight(temp, "\u0000\u0020")
+			}
+			if sas.TextDecoder != nil {
+				var err error
+				temp, err = sas.TextDecoder.Bytes(temp)
+				if err != nil {
+					panic(err)
+				}
+			}
+
+			k, ok := sas.stringPoolR[string(temp)]
+			if !ok {
+				k = uint64(len(sas.stringPool))
+				sas.stringPool[k] = string(temp)
+				sas.stringPoolR[string(temp)] = k
+			}
+			sas.stringchunk[j][sas.currentRowInChunkIndex] = k
 		}
 	}
 
-	sas.current_row_on_page_index++
-	sas.current_row_in_chunk_index++
-	sas.current_row_in_file_index++
+	sas.currentRowOnPageIndex++
+	sas.currentRowInChunkIndex++
+	sas.currentRowInFileIndex++
 	return nil
 }
 
-func (sas *SAS7BDAT) pad_float(buf []byte) []byte {
-	w := len(buf)
-	newbuf := make([]byte, 8)
-	if sas.ByteOrder == binary.LittleEndian {
-		copy(newbuf[8-w:8], buf)
-	} else {
-		copy(newbuf[0:w], buf)
-	}
-	return newbuf
-}
+func (sas *SAS7BDAT) processRowSizeSubheader(offset, length int) error {
 
-func check_magic_number(b []byte) bool {
-	for i, v := range []byte(magic) {
-		if v != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (sas *SAS7BDAT) process_rowsize_subheader(offset, length int) error {
-	int_len := sas.properties.int_length
+	int_len := sas.properties.intLength
 	lcs_offset := offset
 	lcp_offset := offset
 	if sas.U64 {
@@ -1221,31 +1261,31 @@ func (sas *SAS7BDAT) process_rowsize_subheader(offset, length int) error {
 	}
 
 	var err error
-	sas.properties.row_length, err = sas.read_int(offset+row_length_offset_multiplier*int_len, int_len)
+	sas.properties.rowLength, err = sas.readInt(offset+row_length_offset_multiplier*int_len, int_len)
 	if err != nil {
 		return err
 	}
-	sas.row_count, err = sas.read_int(offset+row_count_offset_multiplier*int_len, int_len)
+	sas.rowCount, err = sas.readInt(offset+row_count_offset_multiplier*int_len, int_len)
 	if err != nil {
 		return err
 	}
-	sas.properties.col_count_p1, err = sas.read_int(offset+col_count_p1_multiplier*int_len, int_len)
+	sas.properties.colCountP1, err = sas.readInt(offset+col_count_p1_multiplier*int_len, int_len)
 	if err != nil {
 		return err
 	}
-	sas.properties.col_count_p2, err = sas.read_int(offset+col_count_p2_multiplier*int_len, int_len)
+	sas.properties.colCountP2, err = sas.readInt(offset+col_count_p2_multiplier*int_len, int_len)
 	if err != nil {
 		return err
 	}
-	sas.properties.mix_page_row_count, err = sas.read_int(offset+row_count_on_mix_page_offset_multiplier*int_len, int_len)
+	sas.properties.mixPageRowCount, err = sas.readInt(offset+row_count_on_mix_page_offset_multiplier*int_len, int_len)
 	if err != nil {
 		return err
 	}
-	sas.properties.lcs, err = sas.read_int(lcs_offset, 2)
+	sas.properties.lcs, err = sas.readInt(lcs_offset, 2)
 	if err != nil {
 		return err
 	}
-	sas.properties.lcp, err = sas.read_int(lcp_offset, 2)
+	sas.properties.lcp, err = sas.readInt(lcp_offset, 2)
 	if err != nil {
 		return err
 	}
@@ -1253,39 +1293,37 @@ func (sas *SAS7BDAT) process_rowsize_subheader(offset, length int) error {
 	return nil
 }
 
-func (sas *SAS7BDAT) process_columnsize_subheader(offset, length int) error {
-	int_len := sas.properties.int_length
-	offset += int_len
+func (sas *SAS7BDAT) processColumnsizeSubheader(offset, length int) error {
+
+	intLen := sas.properties.intLength
+	offset += intLen
 	var err error
-	sas.properties.column_count, err = sas.read_int(offset, int_len)
+	sas.properties.columnCount, err = sas.readInt(offset, intLen)
 	if err != nil {
 		return err
 	}
-	if sas.properties.col_count_p1+sas.properties.col_count_p2 !=
-		sas.properties.column_count {
-		os.Stderr.WriteString(fmt.Sprintf("Warning: column count mismatch (%d + %d != %d)\n",
-			sas.properties.col_count_p1, sas.properties.col_count_p2,
-			sas.properties.column_count))
+	if sas.properties.colCountP1+sas.properties.colCountP2 != sas.properties.columnCount {
+		msg := fmt.Sprintf("Warning: column count mismatch (%d + %d != %d)\n",
+			sas.properties.colCountP1, sas.properties.colCountP2, sas.properties.columnCount)
+		os.Stderr.WriteString(msg)
 	}
+
 	return nil
 }
 
-func (sas *SAS7BDAT) process_columntext_subheader(offset, length int) error {
+func (sas *SAS7BDAT) processColumnTextSubheader(offset, length int) error {
 
-	offset += sas.properties.int_length
-	text_block_size, err := sas.read_int(offset, text_block_size_length)
-	if err != nil {
-		return fmt.Errorf("Cannot read text block size for column names.")
-	}
+	offset += sas.properties.intLength
+	textBlockSize := length - sas.properties.intLength
 
-	err = sas.read_bytes(offset, text_block_size)
+	err := sas.readBytes(offset, textBlockSize)
 	if err != nil {
 		return fmt.Errorf("Cannot read column names strings.")
 	}
-	sas.column_names_strings = append(sas.column_names_strings, string(sas.buf[0:text_block_size]))
+	sas.columnNamesStrings = append(sas.columnNamesStrings, string(sas.buf[0:textBlockSize]))
 
-	if len(sas.column_names_strings) == 1 {
-		column_name := sas.column_names_strings[0]
+	if len(sas.columnNamesStrings) == 1 {
+		column_name := sas.columnNamesStrings[0]
 		var compression_literal string
 		for _, cl := range compression_literals {
 			if strings.Contains(column_name, cl) {
@@ -1294,159 +1332,165 @@ func (sas *SAS7BDAT) process_columntext_subheader(offset, length int) error {
 			}
 		}
 		sas.Compression = compression_literal
-		offset -= sas.properties.int_length
+		offset -= sas.properties.intLength
 
 		offset1 := offset + 16
 		if sas.U64 {
 			offset1 += 4
 		}
-		err := sas.read_bytes(offset1, sas.properties.lcp)
+		err := sas.readBytes(offset1, sas.properties.lcp)
 		if err != nil {
 			return err
 		}
 		compression_literal = strings.Trim(string(sas.buf[0:8]), "\x00")
-		if compression_literal == "" {
+
+		switch {
+		case compression_literal == "":
 			sas.properties.lcs = 0
 			offset1 = offset + 32
 			if sas.U64 {
 				offset1 += 4
 			}
-			err = sas.read_bytes(offset1, sas.properties.lcp)
+			err = sas.readBytes(offset1, sas.properties.lcp)
 			if err != nil {
 				return err
 			}
-			sas.properties.creator_proc = string(sas.buf[0:sas.properties.lcp])
-		} else if compression_literal == rle_compression {
+			sas.properties.creatorProc = string(sas.buf[0:sas.properties.lcp])
+		case compression_literal == rle_compression:
 			offset1 = offset + 40
 			if sas.U64 {
 				offset1 += 4
 			}
-			err = sas.read_bytes(offset1, sas.properties.lcp)
+			err = sas.readBytes(offset1, sas.properties.lcp)
 			if err != nil {
 				return err
 			}
-			sas.properties.creator_proc = string(sas.buf[0:sas.properties.lcp])
-		} else if sas.properties.lcs > 0 {
+			sas.properties.creatorProc = string(sas.buf[0:sas.properties.lcp])
+		case sas.properties.lcs > 0:
 			sas.properties.lcp = 0
 			offset1 = offset + 16
 			if sas.U64 {
 				offset1 += 4
 			}
-			err = sas.read_bytes(offset1, sas.properties.lcs)
+			err = sas.readBytes(offset1, sas.properties.lcs)
 			if err != nil {
 				return err
 			}
-			sas.properties.creator_proc = string(sas.buf[0:sas.properties.lcp])
+			sas.properties.creatorProc = string(sas.buf[0:sas.properties.lcp])
 		}
 	}
 	return nil
 }
 
-func (sas *SAS7BDAT) process_columnname_subheader(offset, length int) error {
+func (sas *SAS7BDAT) processColumnNameSubheader(offset, length int) error {
 
-	int_len := sas.properties.int_length
-	offset += int_len
-	column_name_pointers_count := (length - 2*int_len - 12) / 8
+	intLen := sas.properties.intLength
+	offset += intLen
+	column_name_pointers_count := (length - 2*intLen - 12) / 8
 	for i := 0; i < column_name_pointers_count; i++ {
 		text_subheader := offset + column_name_pointer_length*(i+1) + column_name_text_subheader_offset
 		col_name_offset := offset + column_name_pointer_length*(i+1) + column_name_offset_offset
 		col_name_length := offset + column_name_pointer_length*(i+1) + column_name_length_offset
 
-		idx, err := sas.read_int(text_subheader, column_name_text_subheader_length)
+		idx, err := sas.readInt(text_subheader, column_name_text_subheader_length)
 		if err != nil {
 			return fmt.Errorf("Unable to read text subheader for column name.")
 		}
-		col_offset, err := sas.read_int(col_name_offset, column_name_offset_length)
+		col_offset, err := sas.readInt(col_name_offset, column_name_offset_length)
 		if err != nil {
 			return fmt.Errorf("Unable to read column_name offset.")
 		}
-		col_len, err := sas.read_int(col_name_length, column_name_length_length)
+		col_len, err := sas.readInt(col_name_length, column_name_length_length)
 		if err != nil {
 			return fmt.Errorf("Unable to read column name length.")
 		}
 
-		name_str := sas.column_names_strings[idx]
-		sas.column_names = append(sas.column_names, name_str[col_offset:col_offset+col_len])
+		name_str := sas.columnNamesStrings[idx]
+		sas.columnNames = append(sas.columnNames, name_str[col_offset:col_offset+col_len])
 	}
 
 	return nil
 }
 
-func (sas *SAS7BDAT) process_columnlist_subheader(offset, length int) error {
+func (sas *SAS7BDAT) processColumnListSubheader(offset, length int) error {
 	// unknown purpose
 	return nil
 }
 
-func (sas *SAS7BDAT) process_columnattributes_subheader(offset, length int) error {
+func (sas *SAS7BDAT) processColumnAttributesSubheader(offset, length int) error {
 
-	int_len := sas.properties.int_length
-	column_attributes_vectors_count := (length - 2*int_len - 12) / (int_len + 8)
+	intLen := sas.properties.intLength
+	column_attributes_vectors_count := (length - 2*intLen - 12) / (intLen + 8)
 	for i := 0; i < column_attributes_vectors_count; i++ {
-		col_data_offset := (offset + int_len + column_data_offset_offset + i*(int_len+8))
-		col_data_len := (offset + 2*int_len + column_data_length_offset + i*(int_len+8))
-		col_types := (offset + 2*int_len + column_type_offset + i*(int_len+8))
 
-		x, err := sas.read_int(col_data_offset, int_len)
+		colDataOffset := offset + intLen + column_data_offset_offset + i*(intLen+8)
+		colDataLen := offset + 2*intLen + column_data_length_offset + i*(intLen+8)
+		colTypes := offset + 2*intLen + column_type_offset + i*(intLen+8)
+
+		x, err := sas.readInt(colDataOffset, intLen)
 		if err != nil {
 			return err
 		}
-		sas.column_data_offsets = append(sas.column_data_offsets, x)
+		sas.columnDataOffsets = append(sas.columnDataOffsets, x)
 
-		x, err = sas.read_int(col_data_len, column_data_length_length)
+		x, err = sas.readInt(colDataLen, column_data_length_length)
 		if err != nil {
 			return err
 		}
-		sas.column_data_lengths = append(sas.column_data_lengths, x)
+		sas.columnDataLengths = append(sas.columnDataLengths, x)
 
-		x, err = sas.read_int(col_types, column_type_length)
+		x, err = sas.readInt(colTypes, column_type_length)
 		if err != nil {
 			return err
 		}
 		if x == 1 {
-			sas.column_types = append(sas.column_types, number_column_type)
+			sas.columnTypes = append(sas.columnTypes, SASNumericType)
 		} else {
-			sas.column_types = append(sas.column_types, string_column_type)
+			sas.columnTypes = append(sas.columnTypes, SASStringType)
 		}
 	}
 
 	return nil
 }
 
-func (sas *SAS7BDAT) process_format_subheader(offset, length int) error {
+func (sas *SAS7BDAT) processFormatSubheader(offset, length int) error {
 
-	int_len := sas.properties.int_length
+	int_len := sas.properties.intLength
 	text_subheader_format := offset + column_format_text_subheader_index_offset + 3*int_len
 	col_format_offset := offset + column_format_offset_offset + 3*int_len
 	col_format_len := offset + column_format_length_offset + 3*int_len
 	text_subheader_label := offset + column_label_text_subheader_index_offset + 3*int_len
 	col_label_offset := offset + column_label_offset_offset + 3*int_len
-	col_label_len := offset + column_label_offset_length + 3*int_len
+	col_label_len := offset + column_label_length_offset + 3*int_len
 
-	x, _ := sas.read_int(text_subheader_format, column_format_text_subheader_index_length)
-	format_idx := min(x, len(sas.column_names_strings)-1)
+	format_idx, _ := sas.readInt(text_subheader_format, column_format_text_subheader_index_length)
+	format_idx = min(format_idx, len(sas.columnNamesStrings)-1)
 
-	format_start, _ := sas.read_int(col_format_offset, column_format_offset_length)
-	format_len, _ := sas.read_int(col_format_len, column_format_length_length)
+	format_start, _ := sas.readInt(col_format_offset, column_format_offset_length)
+	format_len, _ := sas.readInt(col_format_len, column_format_length_length)
 
-	label_idx, _ := sas.read_int(text_subheader_label, column_label_text_subheader_index_length)
-	label_idx = min(label_idx, len(sas.column_names_strings)-1)
+	label_idx, _ := sas.readInt(text_subheader_label, column_label_text_subheader_index_length)
+	label_idx = min(label_idx, len(sas.columnNamesStrings)-1)
 
-	label_start, _ := sas.read_int(col_label_offset, column_label_offset_length)
-	label_len, _ := sas.read_int(col_label_len, column_label_length_length)
+	label_start, _ := sas.readInt(col_label_offset, column_label_offset_length)
+	label_len, _ := sas.readInt(col_label_len, column_label_length_length)
 
-	label_names := sas.column_names_strings[label_idx]
+	label_names := sas.columnNamesStrings[label_idx]
 	column_label := label_names[label_start : label_start+label_len]
-	format_names := sas.column_names_strings[format_idx]
+	format_names := sas.columnNamesStrings[format_idx]
 	column_format := format_names[format_start : format_start+format_len]
 	current_column_number := len(sas.columns)
 
-	col := &Column{current_column_number,
-		sas.column_names[current_column_number],
-		column_label,
-		column_format,
-		sas.column_types[current_column_number],
-		sas.column_data_lengths[current_column_number]}
+	col := &column{
+		colId:  current_column_number,
+		name:   sas.columnNames[current_column_number],
+		label:  column_label,
+		format: column_format,
+		ctype:  sas.columnTypes[current_column_number],
+		length: sas.columnDataLengths[current_column_number],
+	}
 
+	sas.columnLabels = append(sas.columnLabels, column_label)
 	sas.ColumnFormats = append(sas.ColumnFormats, column_format)
 	sas.columns = append(sas.columns, col)
 
@@ -1455,53 +1499,65 @@ func (sas *SAS7BDAT) process_format_subheader(offset, length int) error {
 
 // RowCount returns the number of rows in the data set.
 func (sas *SAS7BDAT) RowCount() int {
-	return sas.row_count
+	return sas.rowCount
 }
 
 // ColumnNames returns the names of the columns.
 func (sas *SAS7BDAT) ColumnNames() []string {
-	return sas.column_names
+	return sas.columnNames
+}
+
+// ColumnLabels returns the column labels.
+func (sas *SAS7BDAT) ColumnLabels() []string {
+	return sas.columnLabels
 }
 
 // ColumnTypes returns integer codes for the column data types.
-func (sas *SAS7BDAT) ColumnTypes() []int {
-	return sas.column_types
+func (sas *SAS7BDAT) ColumnTypes() []ColumnTypeT {
+	return sas.columnTypes
 }
 
 func (sas *SAS7BDAT) parseMetadata() error {
-	done := false
-	for !done {
-		n, err := sas.file.Read(sas.cached_page)
+
+	for {
+		n, err := sas.file.Read(sas.cachedPage)
 		if n <= 0 {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		if n != sas.properties.page_length {
+		if n != sas.properties.pageLength {
 			return fmt.Errorf("Failed to read a meta data page from the SAS file.")
 		}
-		done, err = sas.process_page_meta()
-		if err != nil {
+		var done bool
+		if done, err = sas.processPageMeta(); err != nil {
 			return err
 		}
+		if done {
+			break
+		}
 	}
+
 	return nil
 }
 
-func (sas *SAS7BDAT) process_page_meta() (bool, error) {
-	sas.read_page_header()
-	if is_page_meta_mix_amd(sas.current_page_type) {
-		err := sas.process_page_metadata()
-		if err != nil {
+func (sas *SAS7BDAT) processPageMeta() (bool, error) {
+
+	if err := sas.readPageHeader(); err != nil {
+		return false, err
+	}
+
+	if isPageMetaMixAmd(sas.currentPageType) {
+		if err := sas.processPageMetadata(); err != nil {
 			return false, err
 		}
 	}
-	return sas.is_page_mix_data_type(sas.current_page_type) ||
-		(sas.current_page_data_subheader_pointers != nil), nil
+
+	return sas.isPageMixDataType(sas.currentPageType) || sas.currentPageDataSubheaderPointers != nil, nil
 }
 
-func is_page_meta_mix_amd(pagetype int) bool {
+func isPageMetaMixAmd(pagetype int) bool {
 	switch pagetype {
 	case page_meta_type, 512, 640, page_amd_type:
 		return true
@@ -1509,7 +1565,7 @@ func is_page_meta_mix_amd(pagetype int) bool {
 	return false
 }
 
-func (sas *SAS7BDAT) is_page_mix_type(val int) bool {
+func (sas *SAS7BDAT) isPageMixType(val int) bool {
 	switch val {
 	case 512, 640:
 		return true
@@ -1517,7 +1573,7 @@ func (sas *SAS7BDAT) is_page_mix_type(val int) bool {
 	return false
 }
 
-func (sas *SAS7BDAT) is_page_mix_data_type(val int) bool {
+func (sas *SAS7BDAT) isPageMixDataType(val int) bool {
 	switch val {
 	case 512, 640, 256:
 		return true
@@ -1525,34 +1581,10 @@ func (sas *SAS7BDAT) is_page_mix_data_type(val int) bool {
 	return false
 }
 
-func (sas *SAS7BDAT) is_page_mix_amd(val int) bool {
-	switch val {
-	case 0, 512, 640, 1024:
-		return true
-	}
-	return false
-}
-
-func is_page_any(val int) bool {
-	switch val {
-	case 0, 512, 640, 1024, 256, 16384, -28672:
-		return true
-	}
-	return false
-}
-
-func check_page_type(current_page int) bool {
+func checkPageType(current_page int) bool {
 	switch current_page {
 	case page_meta_type, page_data_type, 512, 640:
 		return false
 	}
 	return true
-}
-
-func tmp_sum(vec []byte) int {
-	x := 0
-	for _, v := range vec {
-		x += int(v)
-	}
-	return x
 }

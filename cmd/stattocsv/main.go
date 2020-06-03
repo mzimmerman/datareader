@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -15,21 +16,22 @@ import (
 	"github.com/kshedden/datareader"
 )
 
-func do_conversion(rdr datareader.Statfilereader) {
+func doConversion(rdr datareader.StatfileReader) {
 
 	w := csv.NewWriter(os.Stdout)
 
 	ncol := len(rdr.ColumnNames())
-	w.Write(rdr.ColumnNames())
+	if err := w.Write(rdr.ColumnNames()); err != nil {
+		panic(err)
+	}
 
 	row := make([]string, ncol)
 
 	for {
 		chunk, err := rdr.Read(1000)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			panic(err)
-		}
-		if chunk == nil {
+		} else if chunk == nil || err == io.EOF {
 			break
 		}
 
@@ -49,42 +51,45 @@ func do_conversion(rdr datareader.Statfilereader) {
 			missing[j] = chunk[j].Missing()
 			dcol := chunk[j].Data()
 			switch dcol.(type) {
-			default:
-				panic(fmt.Sprintf("unknown type: %T", dcol))
 			case []time.Time:
 				timecols[j] = dcol.([]time.Time)
 			case []float64:
 				numbercols[j] = dcol.([]float64)
 			case []string:
 				stringcols[j] = dcol.([]string)
+			default:
+				panic(fmt.Sprintf("unknown type: %T", dcol))
 			}
 		}
 
 		for i := 0; i < nrow; i++ {
 			for j := 0; j < ncol; j++ {
 				if numbercols[j] != nil {
-					if missing[j] == nil || missing[j][i] == false {
+					if missing[j] == nil || !missing[j][i] {
 						row[j] = fmt.Sprintf("%f", numbercols[j][i])
 					} else {
 						row[j] = ""
 					}
 				} else if stringcols[j] != nil {
-					if missing[j] == nil || missing[j][i] == false {
-						row[j] = fmt.Sprintf("%s", stringcols[j][i])
+					if missing[j] == nil || !missing[j][i] {
+						row[j] = stringcols[j][i]
 					} else {
 						row[j] = ""
 					}
 				} else if timecols[j] != nil {
-					if missing[j] == nil || missing[j][i] == false {
+					if missing[j] == nil || !missing[j][i] {
 						row[j] = fmt.Sprintf("%v", timecols[j][i])
 					} else {
 						row[j] = ""
 					}
 				}
 			}
-			w.Write(row)
+			if err := w.Write(row); err != nil {
+				panic(err)
+			}
 		}
 	}
+
 	w.Flush()
 }
 
@@ -103,6 +108,7 @@ func main() {
 	}
 	defer f.Close()
 
+	// Determine the file type
 	fl := strings.ToLower(fname)
 	filetype := ""
 	if strings.HasSuffix(fl, "sas7bdat") {
@@ -114,7 +120,8 @@ func main() {
 		return
 	}
 
-	var rdr datareader.Statfilereader
+	// Get a reader for either a Stata or SAS file
+	var rdr datareader.StatfileReader
 	if filetype == "sas" {
 		sas, err := datareader.NewSAS7BDATReader(f)
 		if err != nil {
@@ -134,5 +141,5 @@ func main() {
 		rdr = stata
 	}
 
-	do_conversion(rdr)
+	doConversion(rdr)
 }

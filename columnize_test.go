@@ -15,23 +15,24 @@ import (
 )
 
 const (
-	generate_columnize = false
+	// Leave false when testing
+	generateColumnize = false
 )
 
 // Not really a test function, used to generate md5 sums for the results.
 func TestGenerateColumnize(t *testing.T) {
 
-	if !generate_columnize {
+	if !generateColumnize {
 		return
 	}
 
 	ms := make(map[string][16]byte)
 
-	all_test_files := get_filenames()
+	allTestFiles := getFilenames()
 
-	for _, f := range all_test_files {
+	for _, f := range allTestFiles {
 		for _, mode := range []string{"text", "binary"} {
-			m := columnize_base(f, mode)
+			m := columnizeBase(f, mode)
 			k := f + "::" + mode
 			ms[k] = m
 		}
@@ -47,57 +48,76 @@ func TestGenerateColumnize(t *testing.T) {
 		panic(err)
 	}
 
-	cf.Write(b)
+	if _, err := cf.Write(b); err != nil {
+		panic(err)
+	}
 	cf.Close()
 }
 
-func columnize_base(fname, mode string) [16]byte {
+func columnizeBase(fname, mode string) [16]byte {
 
+	// Clear the workspace and set up the subdirectories.
 	outpath := filepath.Join("test_files", "tmp", "cols")
-	os.RemoveAll(outpath)
-	os.Mkdir(outpath, os.ModeDir)
-
-	cmd_name := filepath.Join(os.Getenv("GOBIN"), "columnize")
-	infile := filepath.Join("test_files", "tmp", "cols", fname)
-	args := []string{fmt.Sprintf("-in=%s", infile), fmt.Sprintf("-out=%s", outpath),
-		fmt.Sprintf("-mode=%s", mode)}
-	_, err := exec.Command(cmd_name, args...).Output()
-	if err != nil {
+	if err := os.RemoveAll(outpath); err != nil {
+		panic(err)
+	}
+	if err := os.MkdirAll(outpath, os.ModePerm); err != nil {
 		panic(err)
 	}
 
-	files, _ := ioutil.ReadDir(outpath)
-	file_names := make([]string, 0, 10)
-	for _, v := range files {
-		file_names = append(file_names, v.Name())
+	// Run columnize on the file
+	cmdName := filepath.Join(os.Getenv("GOBIN"), "columnize")
+	infile := filepath.Join("test_files", "data", fname)
+	args := []string{
+		fmt.Sprintf("-in=%s", infile),
+		fmt.Sprintf("-out=%s", outpath),
+		fmt.Sprintf("-mode=%s", mode),
 	}
-	sort.Strings(file_names)
+	cmd := exec.Command(cmdName, args...)
+	cmd.Stderr = os.Stderr
+	if _, err := cmd.Output(); err != nil {
+		panic(err)
+	}
+
+	files, err := ioutil.ReadDir(outpath)
+	if err != nil {
+		panic(err)
+	}
+	var fileNames []string
+	for _, v := range files {
+		fileNames = append(fileNames, v.Name())
+	}
+	sort.Strings(fileNames)
 
 	var buf bytes.Buffer
-	for _, f := range file_names {
+	for _, f := range fileNames {
 		if strings.HasPrefix(f, ".") {
 			continue
 		}
+
 		gname := filepath.Join("test_files", "tmp", "cols", f)
 		g, err := os.Open(gname)
 		if err != nil {
 			panic(err)
 		}
 		defer g.Close()
+
 		ba, err := ioutil.ReadAll(g)
 		if err != nil {
 			panic(err)
 		}
-		buf.Write(ba)
-	}
-	m := md5.Sum(buf.Bytes())
 
-	return m
+		if _, err := buf.Write(ba); err != nil {
+			panic(err)
+		}
+	}
+
+	return md5.Sum(buf.Bytes())
 }
 
 func TestColumnize1(t *testing.T) {
 
-	if generate_columnize {
+	if generateColumnize {
 		return
 	}
 
@@ -107,28 +127,31 @@ func TestColumnize1(t *testing.T) {
 	}
 	defer cf.Close()
 
+	// Read the stored checksums
 	var checksum map[string][]byte
 	b, err := ioutil.ReadAll(cf)
 	if err != nil {
 		panic(err)
 	}
-	json.Unmarshal(b, &checksum)
+	if err := json.Unmarshal(b, &checksum); err != nil {
+		panic(err)
+	}
 
-	all_test_files := get_filenames()
+	allTestFiles := getFilenames()
 
-	for _, f := range all_test_files {
+	for _, f := range allTestFiles {
 		for _, mode := range []string{"text", "binary"} {
 
-			m := columnize_base(f, mode)
-			k := f + "::" + mode
-			m1 := checksum[k]
+			m := columnizeBase(f, mode)
+			m1 := checksum[f+"::"+mode]
 
-			for j, _ := range m {
+			for j := range m {
 				if m[j] != m1[j] {
+					fmt.Printf("Failing %s    mode: %s\n", f, mode)
+					fmt.Printf("Expected %v, got %v\n", m[j], m1[j])
 					t.Fail()
 				}
 			}
 		}
-
 	}
 }

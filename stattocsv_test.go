@@ -11,17 +11,21 @@ import (
 	"testing"
 )
 
-func run_stattocsv(filenames []string) map[string][16]byte {
+// runStattocsv runs stattocsv on all the files in the test_files
+// directory, and calculates an md5 checksum on each output file.
+func runStattocsv(filenames []string) map[string][16]byte {
 
 	checksums := make(map[string][16]byte)
 
-	cmd_name := filepath.Join(os.Getenv("GOBIN"), "stattocsv")
+	cmdName := filepath.Join(os.Getenv("GOBIN"), "stattocsv")
 	for _, file := range filenames {
 		infile := filepath.Join("test_files", "data", file)
 		args := []string{infile}
-		rslt, err := exec.Command(cmd_name, args...).Output()
+		cmd := exec.Command(cmdName, args...)
+		cmd.Stderr = os.Stderr
+		rslt, err := cmd.Output()
 		if err != nil {
-			os.Stderr.WriteString(fmt.Sprintf("run_stattocsv:: %v %v\n", cmd_name, infile))
+			os.Stderr.WriteString(fmt.Sprintf("runStattocsv:: %v %v\n", cmdName, infile))
 			panic(err)
 		}
 		checksums[file] = md5.Sum(rslt)
@@ -30,11 +34,12 @@ func run_stattocsv(filenames []string) map[string][16]byte {
 	return checksums
 }
 
-func ref_checksums(filenames []string) map[string][16]byte {
+func refChecksums(filenames []string) map[string][16]byte {
 
 	checksums := make(map[string][16]byte)
 
 	for _, file := range filenames {
+
 		file1 := strings.Replace(file, ".dta", ".csv", -1)
 		file1 = strings.Replace(file1, ".sas7bdat", ".csv", -1)
 
@@ -66,15 +71,17 @@ func ref_checksums(filenames []string) map[string][16]byte {
 	return checksums
 }
 
-func get_filenames() []string {
+func getFilenames() []string {
+
 	files, err := ioutil.ReadDir(filepath.Join("test_files", "data"))
 	if err != nil {
 		panic(err)
 	}
-	filenames := make([]string, 0, 10)
+
+	var filenames []string
 	for _, f := range files {
 		name := f.Name()
-		if !strings.HasPrefix(name, ".") && (strings.HasSuffix(name, ".dta") || strings.HasSuffix(name, ".sas7bdat")) {
+		if strings.HasSuffix(name, ".dta") || strings.HasSuffix(name, ".sas7bdat") {
 			filenames = append(filenames, name)
 		}
 	}
@@ -82,17 +89,17 @@ func get_filenames() []string {
 	return filenames
 }
 
-func Test_stattocsv_1(t *testing.T) {
+func TestStattocsv1(t *testing.T) {
 
-	test_files := get_filenames()
-	new_checksums := run_stattocsv(test_files)
-	old_checksums := ref_checksums(test_files)
+	testFiles := getFilenames()
+	newChecksums := runStattocsv(testFiles)
+	oldChecksums := refChecksums(testFiles)
 
-	for ky, _ := range old_checksums {
+	for ky := range oldChecksums {
 
 		for j := 0; j < 16; j++ {
-			if new_checksums[ky][j] != old_checksums[ky][j] {
-				fmt.Printf("%v\n%v\n%v\n\n", ky, new_checksums[ky], old_checksums[ky])
+			if newChecksums[ky][j] != oldChecksums[ky][j] {
+				fmt.Printf("%v\n%v\n%v\n\n", ky, newChecksums[ky], oldChecksums[ky])
 				t.Fail()
 			}
 		}

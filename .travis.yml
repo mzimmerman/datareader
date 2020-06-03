@@ -1,14 +1,17 @@
 language: go
 
 go:
-  - tip
+ - 1.12.x
+ - master
 
-install:
-  - go get golang.org/x/text/encoding
-  - go get golang.org/x/text/encoding/charmap
-  - make all
+before_install:
+ - go get github.com/pkg/errors
 
-env:
-  - GOBIN=${HOME}/gopath/bin
+go:
+   - tip
 
-script: go test ./...
+script:
+  - go test -race -coverprofile=coverage.txt -covermode=atomic
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)

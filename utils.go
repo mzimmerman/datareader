@@ -4,16 +4,16 @@ import (
 	"fmt"
 )
 
-// Statfilereader is an interface that can be used to work
+// StatfileReader is an interface that can be used to work
 // interchangeably with StataReader and SAS7BDAT objects.
-type Statfilereader interface {
+type StatfileReader interface {
 	ColumnNames() []string
-	ColumnTypes() []int
+	ColumnTypes() []ColumnTypeT
 	RowCount() int
 	Read(int) ([]*Series, error)
 }
 
-func upcast_numeric(vec interface{}) ([]float64, error) {
+func upcastNumeric(vec interface{}) ([]float64, error) {
 
 	switch vec.(type) {
 	default:
@@ -63,7 +63,7 @@ func upcast_numeric(vec interface{}) ([]float64, error) {
 	}
 }
 
-func cast_to_int(x interface{}) ([]int64, error) {
+func castToInt(x interface{}) ([]int64, error) {
 
 	switch x.(type) {
 	default:

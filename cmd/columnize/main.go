@@ -11,36 +11,44 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"github.com/kshedden/datareader"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/kshedden/datareader"
 )
 
-func do_split(rdr datareader.Statfilereader, col_dir string, mode string) {
+func doSplit(rdr datareader.StatfileReader, colDir string, mode string) {
 
 	ncol := len(rdr.ColumnNames())
 	columns := make([]io.Writer, ncol)
 
-	cf, err := os.Create(filepath.Join(col_dir, "columns.txt"))
-	defer cf.Close()
+	// Create a file to contain the column names
+	cf, err := os.Create(filepath.Join(colDir, "columns.txt"))
 	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("unable to create file in %s: %v\n", col_dir, err))
+		os.Stderr.WriteString(fmt.Sprintf("unable to create file in %s: %v\n", colDir, err))
 		return
 	}
+	defer cf.Close()
+
+	// Write the column names
 	for i, c := range rdr.ColumnNames() {
-		cf.WriteString(fmt.Sprintf("%d,%s\n", i+1, c))
+		if _, err := cf.WriteString(fmt.Sprintf("%d,%s\n", i, c)); err != nil {
+			panic(err)
+		}
 	}
 
-	for j, _ := range rdr.ColumnNames() {
-		fn := filepath.Join(col_dir, fmt.Sprintf("%d", j))
+	// Create a writer for each column
+	for j := range rdr.ColumnNames() {
+		fn := filepath.Join(colDir, fmt.Sprintf("%d", j))
 		f, err := os.Create(fn)
-		defer f.Close()
 		if err != nil {
-			os.Stderr.WriteString(fmt.Sprintf("unable to create file for column %d: %v\n", j+1, err))
+			os.Stderr.WriteString(fmt.Sprintf("unable to create file for column %d: %v\n", j, err))
 		}
+		defer f.Close()
+
 		columns[j] = f
 	}
 
@@ -63,30 +71,47 @@ func do_split(rdr datareader.Statfilereader, col_dir string, mode string) {
 			ds := chunk[j].Data()
 			switch ds.(type) {
 			case []float64:
-				if mode == "binary" {
-					buf := new(bytes.Buffer)
+				switch mode {
+				case "binary":
+					var buf bytes.Buffer
 					for i, x := range ds.([]float64) {
-						if (missing[j] == nil) || (missing[j][i] == false) {
-							binary.Write(buf, binary.LittleEndian, x)
+						if missing[j] == nil || !missing[j][i] {
+							if err := binary.Write(&buf, binary.LittleEndian, x); err != nil {
+								panic(err)
+							}
 						} else {
-							binary.Write(buf, binary.LittleEndian, math.NaN())
+							if err := binary.Write(&buf, binary.LittleEndian, math.NaN()); err != nil {
+								panic(err)
+							}
 						}
 					}
-					columns[j].Write(buf.Bytes())
-				} else {
+					if _, err := columns[j].Write(buf.Bytes()); err != nil {
+						panic(err)
+					}
+				case "text":
 					vec := ds.([]float64)
 					for i, x := range vec {
-						if (missing[j] == nil) || (missing[j][i] == false) {
-							columns[j].Write([]byte(fmt.Sprintf("%v\n", x)))
+						if missing[j] == nil || !missing[j][i] {
+							if _, err := columns[j].Write([]byte(fmt.Sprintf("%v\n", x))); err != nil {
+								panic(err)
+							}
 						} else {
-							columns[j].Write([]byte("\n"))
+							if _, err := columns[j].Write([]byte("\n")); err != nil {
+								panic(err)
+							}
 						}
 					}
+				default:
+					panic("Invalid mode")
 				}
 			case []string:
 				for _, x := range ds.([]string) {
-					columns[j].Write([]byte(x))
-					columns[j].Write([]byte("\n"))
+					if _, err := columns[j].Write([]byte(x)); err != nil {
+						panic(err)
+					}
+					if _, err := columns[j].Write([]byte("\n")); err != nil {
+						panic(err)
+					}
 				}
 			}
 		}
@@ -96,12 +121,12 @@ func do_split(rdr datareader.Statfilereader, col_dir string, mode string) {
 func main() {
 
 	if len(os.Args) != 4 {
-		os.Stderr.WriteString(fmt.Sprintf("usage: %s -in=file -out=directory -mode=mode\n", os.Args[0]))
+		os.Stderr.WriteString(fmt.Sprintf("usage: %s -in=file -out=directory -mode=[text|binary]\n", os.Args[0]))
 		return
 	}
 
-	in_file := flag.String("in", "", "A SAS7BDAT or Stata dta file name")
-	col_dir := flag.String("out", "", "A directory for writing the columns")
+	infile := flag.String("in", "", "A SAS7BDAT or Stata dta file name")
+	colDir := flag.String("out", "", "A directory for writing the columns")
 	mode := flag.String("mode", "text", "Write numeric data as 'text' or 'binary'")
 
 	flag.Parse()
@@ -111,24 +136,24 @@ func main() {
 		return
 	}
 
-	fl := strings.ToLower(*in_file)
+	fl := strings.ToLower(*infile)
 	filetype := ""
 	if strings.HasSuffix(fl, "sas7bdat") {
 		filetype = "sas"
 	} else if strings.HasSuffix(fl, "dta") {
 		filetype = "stata"
 	} else {
-		os.Stderr.WriteString(fmt.Sprintf("%s file cannot be read", *in_file))
+		os.Stderr.WriteString(fmt.Sprintf("%s file cannot be read", *infile))
 		return
 	}
 
-	r, err := os.Open(*in_file)
+	r, err := os.Open(*infile)
 	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("unable to open %s\n", in_file))
+		os.Stderr.WriteString(fmt.Sprintf("unable to open %s\n", *infile))
 	}
 	defer r.Close()
 
-	var rdr datareader.Statfilereader
+	var rdr datareader.StatfileReader
 	if filetype == "sas" {
 		rdr, err = datareader.NewSAS7BDATReader(r)
 		if err != nil {
@@ -143,5 +168,5 @@ func main() {
 		}
 	}
 
-	do_split(rdr, *col_dir, *mode)
+	doSplit(rdr, *colDir, *mode)
 }

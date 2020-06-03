@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// A Series is a homogeneously-typed one-dimensional sequence of data
+// A Series is a fixed-type one-dimensional sequence of data
 // values, with an optional mask for missing values.
 type Series struct {
 
@@ -19,7 +19,7 @@ type Series struct {
 	// The length of the series.
 	length int
 
-	// The data, must be a homogeneous array, e.g. []float64.
+	// The data, must be a slice of primitives, e.g. []float64.
 	data interface{}
 
 	// Indicators that data values are missing.  If nil, there are
@@ -27,42 +27,50 @@ type Series struct {
 	missing []bool
 }
 
-// NewSeries returns a new Series object with the given name and data
-// contents.  The data parameter must be an array of floats, ints, or
-// strings.  The underlying data is not copied, so changes to data will
-// impact the series.
-func NewSeries(name string, data interface{}, missing []bool) (*Series, error) {
-
-	var length int
+// ilen returns the length of a slice, held in an interface value.
+// If the interface does not hold a slice of a known type, an error
+// is returned.
+func ilen(data interface{}) (int, error) {
 
 	switch data.(type) {
-	default:
-		return nil, fmt.Errorf("Unknown data type in NewSeries")
 	case []float64:
-		length = len(data.([]float64))
+		return len(data.([]float64)), nil
 	case []string:
-		length = len(data.([]string))
+		return len(data.([]string)), nil
 	case []int64:
-		length = len(data.([]int64))
+		return len(data.([]int64)), nil
 	case []int32:
-		length = len(data.([]int32))
+		return len(data.([]int32)), nil
 	case []float32:
-		length = len(data.([]float32))
+		return len(data.([]float32)), nil
 	case []int16:
-		length = len(data.([]int16))
+		return len(data.([]int16)), nil
 	case []int8:
-		length = len(data.([]int8))
+		return len(data.([]int8)), nil
 	case []uint64:
-		length = len(data.([]uint64))
+		return len(data.([]uint64)), nil
 	case []time.Time:
-		length = len(data.([]time.Time))
+		return len(data.([]time.Time)), nil
+	default:
+		return 0, fmt.Errorf("Unknown data type")
+	}
+}
+
+// NewSeries returns a new Series value with the given name and data
+// contents.  The data slice parameter is not copied.
+func NewSeries(name string, data interface{}, missing []bool) (*Series, error) {
+
+	length, err := ilen(data)
+	if err != nil {
+		return nil, err
 	}
 
 	ser := Series{
 		Name:    name,
 		length:  length,
 		data:    data,
-		missing: missing}
+		missing: missing,
+	}
 
 	return &ser, nil
 }
@@ -75,94 +83,143 @@ func (ser *Series) Write(w io.Writer) {
 // WriteRange writes the given subinterval of the Series to the given writer.
 func (ser *Series) WriteRange(w io.Writer, first, last int) {
 
-	io.WriteString(w, fmt.Sprintf("Name: %s\n", ser.Name))
+	if _, err := io.WriteString(w, fmt.Sprintf("Name: %s\n", ser.Name)); err != nil {
+		panic(err)
+	}
 	ty := fmt.Sprintf("%T", ser.data)
-	io.WriteString(w, fmt.Sprintf("Type: %s\n", ty[2:len(ty)]))
+	if _, err := io.WriteString(w, fmt.Sprintf("Type: %s\n", ty[2:])); err != nil {
+		panic(err)
+	}
 
 	switch ser.data.(type) {
-	default:
-		panic("Unknown type in WriteRange")
 	case []float64:
 		data := ser.data.([]float64)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %f\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []float32:
 		data := ser.data.([]float32)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %f\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []int64:
 		data := ser.data.([]int64)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %d\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []int32:
 		data := ser.data.([]int32)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %d\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []int16:
 		data := ser.data.([]int16)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %d\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []int8:
 		data := ser.data.([]int8)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %d\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []uint64:
 		data := ser.data.([]uint64)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %d\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []string:
 		data := ser.data.([]string)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %s\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
 	case []time.Time:
 		data := ser.data.([]time.Time)
 		for j := first; j < last; j++ {
-			if (ser.missing == nil) || !ser.missing[j] {
-				io.WriteString(w, fmt.Sprintf("%d:  %v\n", j, data[j]))
+			if ser.missing == nil || !ser.missing[j] {
+				s := fmt.Sprintf("%d:  %v\n", j, data[j])
+				if _, err := io.WriteString(w, s); err != nil {
+					panic(err)
+				}
 			} else {
-				io.WriteString(w, fmt.Sprintf("%d:\n", j))
+				if _, err := io.WriteString(w, fmt.Sprintf("%d:\n", j)); err != nil {
+					panic(err)
+				}
 			}
 		}
+	default:
+		panic("Unknown type in WriteRange")
 	}
 }
 
@@ -171,7 +228,7 @@ func (ser *Series) Print() {
 	ser.Write(os.Stdout)
 }
 
-// PrintRange printes a slice of the Series to the standard output.
+// PrintRange prints a slice of the Series to the standard output.
 func (ser *Series) PrintRange(first, last int) {
 	ser.WriteRange(os.Stdout, first, last)
 }
@@ -213,8 +270,8 @@ func (ser *Series) AllClose(other *Series, tol float64) (bool, int) {
 
 	// Utility function for missing mask
 	cmiss := func(j int) int {
-		f1 := (ser.missing == nil) || (ser.missing[j] == false)
-		f2 := (other.missing == nil) || (other.missing[j] == false)
+		f1 := (ser.missing == nil) || !ser.missing[j]
+		f2 := (other.missing == nil) || !other.missing[j]
 		if f1 != f2 {
 			return 0 // inconsistent
 		} else if f1 {
@@ -450,6 +507,7 @@ func (ser *Series) ForceNumeric() *Series {
 	}
 }
 
+// CountMissing returns the number of missing values in the Series.
 func (ser *Series) CountMissing() int {
 
 	m := 0
@@ -462,6 +520,9 @@ func (ser *Series) CountMissing() int {
 	return m
 }
 
+// StringFunc applies the given function to all values in the series,
+// if the series holds string values.  Otherwise calling this method has
+// no effect.
 func (ser *Series) StringFunc(f func(string) string) *Series {
 
 	n := ser.length
@@ -484,6 +545,8 @@ func (ser *Series) StringFunc(f func(string) string) *Series {
 	}
 }
 
+// ToString returns a Series with string values, derived
+// from the given series.
 func (ser *Series) ToString() *Series {
 
 	n := ser.length
@@ -520,6 +583,10 @@ func (ser *Series) ToString() *Series {
 	}
 }
 
+// NullStringMissing returns a copy of a string series in which
+// zero-length strings are treated as missing values.  If the
+// method is applied to a series that is not of string type,
+// the series is returned unchanged.
 func (ser *Series) NullStringMissing() *Series {
 
 	n := ser.length
@@ -580,7 +647,9 @@ func (ser SeriesArray) AllEqual(other []*Series) (bool, int, int) {
 	return ser.AllClose(other, 0.0)
 }
 
-func (ser *Series) Date_from_duration(base time.Time, units string) (*Series, error) {
+// DateFromDuration returns a new Series in which the data are dates, derived
+// from a given duration value.  Currently, units must be "days".
+func (ser *Series) DateFromDuration(base time.Time, units string) (*Series, error) {
 
 	n := ser.Length()
 
@@ -590,7 +659,7 @@ func (ser *Series) Date_from_duration(base time.Time, units string) (*Series, er
 		copy(miss, ser.missing)
 	}
 
-	td, err := upcast_numeric(ser.data)
+	td, err := upcastNumeric(ser.data)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +670,7 @@ func (ser *Series) Date_from_duration(base time.Time, units string) (*Series, er
 		default:
 			return nil, fmt.Errorf("unknown time unit duration")
 		case "days":
-			if (miss == nil) || !miss[i] {
+			if miss == nil || !miss[i] {
 				newdate[i] = base.Add(time.Hour * time.Duration(24*td[i]))
 			}
 		}
@@ -611,9 +680,12 @@ func (ser *Series) Date_from_duration(base time.Time, units string) (*Series, er
 	if err != nil {
 		return nil, err
 	}
+
 	return rslt, nil
 }
 
+// AsFloat64Slice returns the data of the series as a float64 slice,
+// and a boolean slice for the missing value indicators.
 func (ser *Series) AsFloat64Slice() ([]float64, []bool, error) {
 
 	v, ok := ser.data.([]float64)
@@ -625,6 +697,21 @@ func (ser *Series) AsFloat64Slice() ([]float64, []bool, error) {
 	return v, ser.missing, nil
 }
 
+// AsUint64Slice returns the data of the series as a uint64 slice,
+// and a boolean slice for the missing value indicators.
+func (ser *Series) AsUint64Slice() ([]uint64, []bool, error) {
+
+	v, ok := ser.data.([]uint64)
+	if !ok {
+		msg := fmt.Sprintf("can't convert %T to []uint64", ser.data)
+		return nil, nil, fmt.Errorf(msg)
+	}
+
+	return v, ser.missing, nil
+}
+
+// AsStringSlice returns the series data as slices for the values,
+// and the missing data indicators.
 func (ser *Series) AsStringSlice() ([]string, []bool, error) {
 
 	v, ok := ser.data.([]string)

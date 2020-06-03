@@ -7,14 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-	//"time"
 )
 
-func stata_base_test(fname_csv, fname_stata string) bool {
+func stataBaseTest(fnameCsv, fnameStata string) bool {
 
-	f, err := os.Open(filepath.Join("test_files", "data", fname_csv))
+	f, err := os.Open(filepath.Join("test_files", "data", fnameCsv))
 	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("%v\n", err))
+		logerr(err)
 		return false
 	}
 	defer f.Close()
@@ -23,18 +22,37 @@ func stata_base_test(fname_csv, fname_stata string) bool {
 	rt.HasHeader = true
 	dt, err := rt.Read(-1)
 	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("%v\n", err))
+		logerr(err)
 		return false
 	}
 
-	r, err := os.Open(filepath.Join("test_files", "data", fname_stata))
+	r, err := os.Open(filepath.Join("test_files", "data", fnameStata))
+	if err != nil {
+		logerr(err)
+		return false
+	}
 	stata, err := NewStataReader(r)
 	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("%v\n", err))
+		logerr(err)
 		return false
 	}
 	defer r.Close()
 	stata.InsertCategoryLabels = false
+
+	// Both test files have 10 rows.
+	if stata.RowCount() != 10 {
+		return false
+	}
+
+	// The test files have the same column names
+	if len(stata.ColumnNames()) != 100 {
+		return false
+	}
+	for j, na := range stata.ColumnNames() {
+		if na != fmt.Sprintf("column%d", j+1) {
+			return false
+		}
+	}
 
 	ds, err := stata.Read(-1)
 	if err != nil {
@@ -51,9 +69,9 @@ func stata_base_test(fname_csv, fname_stata string) bool {
 		ds[j] = ds[j].UpcastNumeric()
 		if strings.Contains(formats[j], "%td") {
 			dt[j] = dt[j].ForceNumeric()
-			dt[j], err = dt[j].Date_from_duration(base, "days")
+			dt[j], err = dt[j].DateFromDuration(base, "days")
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("%v\n", err))
+				logerr(err)
 				return false
 			}
 		}
@@ -82,8 +100,9 @@ func TestStata1(t *testing.T) {
 
 	for _, fname := range fnames {
 
-		r := stata_base_test("test1.csv", fname)
+		r := stataBaseTest("test1.csv", fname)
 		if !r {
+			fmt.Printf("Failed on file '%s'", fname)
 			t.Fail()
 		}
 	}
@@ -95,8 +114,9 @@ func TestStata2(t *testing.T) {
 
 	for _, fname := range fnames {
 
-		r := stata_base_test("test2.csv", fname)
+		r := stataBaseTest("test2.csv", fname)
 		if !r {
+			fmt.Printf("Failed on file '%s'", fname)
 			t.Fail()
 		}
 	}

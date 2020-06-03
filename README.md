@@ -1,11 +1,16 @@
+[![Build Status](https://travis-ci.org/kshedden/datareader.svg?branch=master)](https://travis-ci.org/kshedden/datareader)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kshedden/datareader)](https://goreportcard.com/report/github.com/kshedden/datareader)
+[![codecov](https://codecov.io/gh/kshedden/datareader/branch/master/graph/badge.svg)](https://codecov.io/gh/kshedden/datareader)
+[![GoDoc](https://godoc.org/github.com/kshedden/datareader?status.png)](https://godoc.org/github.com/kshedden/datareader)
+
 datareader : read SAS and Stata files in Go
 =========================
 
 __datareader__ is a pure [Go](https://golang.org) (Golang) package
 that can read binary SAS format (SAS7BDAT) and Stata format (dta) data
-files into native Go data structures.  For non-Go users, there are two
-command line utilities that convert SAS and Stata files into text file
-formats.
+files into native Go data structures.  For non-Go users, there are
+command line utilities that convert SAS and Stata files into text/csv
+and parquet files.
 
 The Stata reader is based on the Stata documentation for the [dta file
 format](http://www.stata.com/help.cgi?dta) and supports dta versions
@@ -92,12 +97,15 @@ dt, _ := rt.Read(-1)
 // obtain data from dt as in the SAS example above
 ```
 
-## Commands
+## Command line utilities
 
-Two command-line utilities use the datareader package to allow
-conversion of SAS and Stata datasets to other formats without using
-Go.  Run the Makefile to compile these commands.  The executables will
-be copied into your GOBIN directory.
+We provide two command-line utilities allowing conversion of SAS and
+Stata datasets to other formats without using
+Go.  Executables for several OS's and architectures are contained in
+the `bin` directory.  The script used to cross-compile these binaries
+is `build.sh`.  To build and install the commands for your local
+architecture only, run the Makefile (the executables will be copied
+into your GOBIN directory).
 
 The `stattocsv` command converts a SAS7BDAT or Stata dta file to a csv
 file, it can be used as follows:
